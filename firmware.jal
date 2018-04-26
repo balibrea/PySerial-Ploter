@@ -1,0 +1,185 @@
+--Titulo: ADC_plot
+--Autor: Yosel de Jesús BalibreaLastre
+-- Compiler: >=2.4q2
+--
+--Descripcion: Este programa recive un valor de tencion por el ADC
+--y lo devuelve por USB_serial a la PC cada 50ms con 10 bits de resolucion
+
+-- chip setup
+include 18f4550
+
+pragma target clock       48_000_000
+
+-- fuses
+pragma target PLLDIV        P5          -- divide by 5 - 20MHZ_INPUT
+pragma target CPUDIV        P1          -- [primary oscillator src: /1][96 mhz pll src: /2]
+pragma target USBDIV        P2          -- CLOCK_SRC_FROM_96MHZ_PLL_2
+pragma target OSC           HS_PLL
+pragma target FCMEN         DISABLED
+pragma target IESO          DISABLED
+pragma target PWRTE         DISABLED    -- power up timer
+pragma target VREGEN        ENABLED     -- USB voltage regulator
+pragma target VOLTAGE       MINIMUM     -- brown out voltage
+pragma target BROWNOUT      DISABLED    -- no brownout detection
+pragma target WDTPS         P32K        -- watch dog saler setting
+pragma target WDT           CONTROL     -- watchdog software controlled
+pragma target CCP2MUX       pin_C1      -- CCP2 on pin C1
+pragma target PBADEN        DIGITAL     -- digital input port<0..4>
+pragma target LPT1OSC       LOW_POWER   -- low power timer 1
+pragma target MCLR          EXTERNAL    -- master reset on RE3
+pragma target STVR          DISABLED    -- reset on stack over/under flow
+pragma target LVP           DISABLED    -- no low-voltage programming
+pragma target XINST         DISABLED     -- extended instruction set
+pragma target DEBUG         DISABLED    -- background debugging
+pragma target CP0           DISABLED    -- code block 0 not protected
+pragma target CP1           DISABLED    -- code block 1 not protected
+pragma target CP2           DISABLED    -- code block 2 not protected
+pragma target CP3           DISABLED    -- code block 3 not protected
+pragma target CPB           DISABLED    -- bootblock code not write protected
+pragma target CPD           DISABLED    -- eeprom code not write protected
+pragma target WRT0          DISABLED    -- table writeblock 0 not protected
+pragma target WRT1          DISABLED    -- table write block 1 not protected
+pragma target WRT2          DISABLED    -- table write block 2 not protected
+pragma target WRT3          DISABLED    -- table write block 3 not protected
+pragma target WRTB          DISABLED    -- bootblock not write protected
+pragma target WRTD          DISABLED    -- eeprom not write protected
+pragma target WRTC          DISABLED    -- config not write protected
+pragma target EBTR0         DISABLED    -- table read block 0 not protected
+pragma target EBTR1         DISABLED    -- table read block 1 not protected
+pragma target EBTR2         DISABLED    -- table read block 2 not protected
+pragma target EBTR3         DISABLED    -- table read block 3 not protected
+pragma target EBTRB         DISABLED    -- boot block not protected
+
+WDTCON_SWDTEN = OFF                     -- disable watchdog
+
+enable_digital_io()
+
+include delay
+include usb_serial
+include print
+
+--~ -- setup delay library
+const word timer0_overflow_rate = 1000         -- desired # of interrupts per second
+const DELAY_SLOTS = 2                     -- slot 0: 1/4 lectura
+                                          -- slot 1: envio
+include timer0_poll_interval               -- non blocking delay library
+timer0_poll_init()                         -- initialize timer0 interrupt service
+
+-- constantes
+const  byte str_welcome[] = "JALLIB USB Serial\n"
+
+-- variables
+
+-- interrupts? No thanks
+INTCON_GIE = false
+
+
+-- Configuracion del ADC
+-- se efectua la medicion en AN0 a alta resolucion
+const bit ADC_HIGH_RESOLUTION = low
+-- we said we want 1 analog channel...
+const byte ADC_NCHANNEL = 1
+-- and no external voltage reference
+const byte ADC_NVREF = ADC_NO_EXT_VREF
+-- We want the fastest possible ADC timing, so we specify here the
+-- minimum TAD value for this chip, which is 0.8 microseconds.
+-- (see datasheet 39632 parameter 130 in table 28-29)
+-- We don't care setting the actual maximum Tad value.
+const ADC_MIN_TAD = 8          -- see documentation of adc_clock.jal
+-- Note: this is the default with the newest ADC library, but it
+--       won't harm to specify this constant here!
+-- now we can include the library
+include adc
+-- and run the initialization step
+adc_init()
+
+var word ch
+
+
+-- setup the USB serial library
+usb_serial_init()
+
+var bit has_shown_welcome_msg = true
+var byte index = 0
+const byte SAMPLES = 4      -- OJO debe ser divisible por 2
+const byte INTERVAL = 100
+var word ave[SAMPLES]
+
+-- escalar el valor del sampling segun los sample
+var byte sampling = INTERVAL / SAMPLES
+
+-- chequeo de inicializacion del USB
+procedure check_usb_init() is
+    -- como es unica la ponemos fisicamente en donde esta el llamado
+    -- para eso se usa inline
+    pragma inline
+    if ( usb_cdc_line_status() !=  0x00 )  then
+        if !has_shown_welcome_msg then
+            has_shown_welcome_msg = true
+            print_string( usb_serial_data, str_welcome )
+        end if
+    else
+        has_shown_welcome_msg = false
+    end if
+end procedure
+
+
+-- leer el valor y hacer push en el array donde corresponda
+procedure medir() is
+    -- medir el valor actual
+    ave[index] = adc_read_high_res(0)
+
+    -- incremento indice
+    index = index + 1
+
+    -- verifico el overflow
+    if (index > 3) then
+        -- preparo para iniciar en el primero
+        index = 0
+    end if
+end procedure
+
+
+-- calcular elpromedio y retornar
+function average() return word is
+    -- temp vars
+    var byte i
+    var word total = 0
+
+    -- sumo los valores
+    for SAMPLES using i loop
+        total = total + ave[i]
+    end loop
+
+    -- saco promedio
+    total = total / SAMPLES
+
+    return total
+end function
+
+
+-- main loop
+forever loop
+    usb_serial_flush()
+
+    -- check if USB device has been configured by the HOST
+    check_usb_init()
+    
+    -- medir cada 25 msec
+    if (check_delay(0)) then
+        -- medir y poner en el array
+        medir()
+        -- recargar el timer del isr
+        set_delay(0, sampling)
+    end if
+
+    -- calc y enviar cada 100ms
+    if (check_delay(1)) then
+        -- recoger el average y enviar por USB
+        print_word_dec(usb_serial_data, average())
+        print_crlf(usb_serial_data)
+        -- recargar el timer del isr
+        set_delay(1, INTERVAL)       
+    end if
+
+end loop
