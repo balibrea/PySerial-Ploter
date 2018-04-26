@@ -3,7 +3,7 @@ This program is used to interface an "Spectrophotometer" wiht a PC. To do that i
 
 
 Tools needed:
-Jalv2 - Jallib
-python2.7 PyQt4
-pyserial
-numpy
+Jalv2 - Jallib,
+python2.7 PyQt4,
+pyserial,
+numpy.
